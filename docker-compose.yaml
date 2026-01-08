@@ -1,0 +1,67 @@
+services:
+  postgis:
+    image: kartoza/postgis:${POSTGIS_VERSION_TAG}
+    container_name: spatial_postgis
+    env_file: .env
+    environment:
+      POSTGRES_DB: ${DATABASE_NAME}
+      POSTGRES_USER: ${DATABASE_USER}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
+    ports:
+      - 5439:${DATABASE_PORT}
+    volumes:
+      - postgis-data:/var/lib/postgresql
+      #- ./init-db:/docker-entrypoint-initdb.d # For running SQL scripts on container startup
+    networks:
+      - spatial-analysis-network
+    healthcheck:
+      test: "PGPASSWORD=${DATABASE_PASSWORD} pg_isready -h 127.0.0.1 -U ${DATABASE_USER} -d ${DATABASE_NAME}"
+      interval: 30s
+      start_period: 30s
+
+  nest:
+    container_name: spatial_nestjs
+    user: root
+    build:
+      context: ./nest-mediator
+    restart: unless-stopped
+    volumes:
+      - ./nest-mediator:/usr/src/app
+      - /usr/src/app/node_modules
+      - spatial_data:/tmp/spatial # Shared workspace
+      - /var/run/docker.sock:/var/run/docker.sock # Allows Nest to talk to Docker
+    command: npm run start:dev
+    env_file: .env
+    ports:
+      - 5006:${NEST_PORT}
+    networks:
+      - spatial-analysis-network
+    depends_on:
+      postgis:
+        condition: service_healthy
+
+  gdal:
+    image: ghcr.io/osgeo/gdal:ubuntu-small-latest
+    container_name: spatial_gdal_cli
+    volumes:
+      - spatial_data:/data
+    networks:
+      - spatial-analysis-network
+    tty: true
+
+  # grass:
+  #   image: osgeo/grass-gis:latest
+  #   container_name: grass_gis
+  #   volumes:
+  #     - spatial_data:/data
+  #   networks:
+  #     - spatial-analysis-network
+  #   tty: true
+
+volumes:
+  postgis-data:
+  spatial_data: # bridge volume for sharing data between containers
+
+networks:
+  spatial-analysis-network:
+    name: spatial-analysis-net

@@ -1,0 +1,11 @@
+# .dockerignore
+dist
+node_modules
+*.log
+npm-debug.log
+
+!/package.json
+!/package-lock.json
+!/tsconfig.prod.json
+!/tsconfig.build.json
+!/tsconfig.json

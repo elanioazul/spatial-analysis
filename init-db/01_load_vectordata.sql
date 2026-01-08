@@ -1,0 +1,2 @@
+--abria que hacer un .sh para que cargase los buildings
+--por el momento se lo meto por consola
