@@ -23,7 +23,7 @@ export class AppController {
     return {
       engine: 'GDAL+ Postgis',
       executionTimeMs: duration,
-      data: result,
+      geojson: result,
     };
   }
 }

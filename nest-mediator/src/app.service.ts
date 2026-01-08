@@ -93,46 +93,13 @@ export class AppService {
     const jsonPath = path.join(this.SHARED_DIR, `poly_${id}.json`);
     const geojsonRaw = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
     this.logger.debug(`GeoJSON Features count: ${geojsonRaw.features.length}`);
-    const visibleFeature = geojsonRaw.features.find((f: any) => f.properties.DN > 0 || f.properties.value > 0);
     const visibleFeatures = geojsonRaw.features.filter((f: any) => f.properties.DN > 0 || f.properties.value > 0);
     const visibleGeometries = visibleFeatures.map(f => f.geometry);
-    this.logger.debug(`Visible Feature: ${JSON.stringify(visibleFeature, null, 2)}`);
+    this.logger.debug(`Visible Feature: ${JSON.stringify(visibleFeatures, null, 2)}`);
 
-    if (!visibleFeature || !visibleFeature.geometry) {
+    if (!visibleFeatures) {
       throw new InternalServerErrorException('No visible area found in viewshed');
     }
-
-    // const intersectSql = `
-    //     WITH 
-    //     terrain_geom AS (
-    //       SELECT ST_SetSRID(ST_GeomFromGeoJSON($1), 4326) as geom
-    //     ),
-    //     center_point AS (
-    //         SELECT
-    //             ST_SetSRID(ST_Point($2, $3), 4326) AS geom
-    //     ),
-    //     building_array AS (
-    //       SELECT 
-    //         COALESCE(array_agg(t.geom), ARRAY[]::geometry[]) AS polys
-    //       FROM 
-    //         escorial_buildings t, center_point c
-    //       WHERE 
-    //         ST_DWithin(t.geom::geography, c.geom::geography, $4::float8)
-    //     )
-    //     SELECT ST_AsGeoJSON(
-    //       ST_Intersection(
-    //         tg.geom, 
-    //         VIEWSHED(
-    //           cp.geom, 
-    //           ba.polys, 
-    //           $4::float8, -- Cast to double precision
-    //           36,
-    //           -999,
-    //           360
-    //         )
-    //       )
-    //     ) as final_result
-    //     FROM terrain_geom tg, building_array ba, center_point cp;`;
 
     const intersectSql = `
         WITH 
@@ -155,31 +122,60 @@ export class AppService {
             escorial_buildings t, center_point c
           WHERE 
             ST_DWithin(t.geom::geography, c.geom::geography, $4::float8)
+        ),
+        final_intersection AS (
+          SELECT 
+            ST_Intersection(
+              tg.geom, 
+              VIEWSHED(cp.geom, ba.polys, $4::float8, 36, -999, 360)
+            ) as geom
+          FROM terrain_geom tg, building_array ba, center_point cp
         )
-        SELECT ST_AsGeoJSON(
-          ST_Intersection(
-            tg.geom, 
-            VIEWSHED(
-              cp.geom, 
-              ba.polys, 
-              $4::float8, 
-              36,
-              -999,
-              360
-            )
+        SELECT json_build_object(
+          'type', 'FeatureCollection',
+          'features',
+          COALESCE(
+            json_agg(
+              json_build_object(
+                'type', 'Feature',
+                'geometry', ST_AsGeoJSON(geom, 9, 3)::json,
+                'properties', json_build_object()
+              )
+            ) FILTER (WHERE geom IS NOT NULL AND NOT ST_IsEmpty(geom)),
+            '[]'::json
           )
-        ) as final_result
-        FROM terrain_geom tg, building_array ba, center_point cp;`;
+        ) AS geojson
+        FROM final_intersection`;
 
-    const finalRes = await this.client.query(intersectSql, [
-      visibleGeometries.map(g => JSON.stringify(g)), 
-      lon, 
-      lat, 
+    const params = [
+      visibleGeometries.map(g => JSON.stringify(g)),
+      lon,
+      lat,
       radius
-    ]);
-    this.logger.debug(`FinalRes: ${JSON.stringify(finalRes, null, 2)}`);
-    
-    return JSON.parse(finalRes.rows[0].final_result);
+    ];
+    const finalRes = await this.client.query(intersectSql, params);
+
+    if (!finalRes.rows || finalRes.rows.length === 0) {
+      // No row returned at all — return empty FeatureCollection
+      return { type: "FeatureCollection", features: [] };
+    }
+
+    let geojson = finalRes.rows[0].geojson;
+
+    if (geojson === null || geojson === undefined) {
+      // explicit fallback
+      return { type: "FeatureCollection", features: [] };
+    }
+
+    if (typeof geojson === "string") {
+      try {
+        geojson = JSON.parse(geojson);
+      } catch (err) {
+        throw new Error("Invalid JSON returned from database: " + String(err));
+      }
+    }
+
+    return geojson;
   }
 
   private cleanup(id: string) {
