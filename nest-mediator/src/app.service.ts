@@ -10,9 +10,9 @@ const execPromise = promisify(exec);
 @Injectable()
 export class AppService {
   private readonly logger = new Logger(AppService.name);
-  // Inside the Nest container, this is where we write files
+  // Nest container, this is where nest write files
   private readonly SHARED_DIR = '/tmp/spatial';
-  // Inside the GDAL/GRASS containers, this is where they look
+  // GDAL/GRASS containers, this is where they look for files
   private readonly CONTAINER_DATA_DIR = '/data';
 
   constructor(@Inject('PG_CLIENT') private readonly client: Client) { }
@@ -20,18 +20,16 @@ export class AppService {
   /**
    * VARIATION 1: GDAL VIEWSHED
    */
-  async getViewshedGdal(lat: number, lon: number, radius: number, obsHeight: number) {
+  async getViewshedGdal(lat: number, lon: number, radius: number, obsHeight: number, rays: number, heading: number, fov: number) {
     const id = Math.random().toString(36).substring(7);
     const mdtFile = `mdt_${id}.tif`;
     const outFile = `view_${id}.tif`;
     const jsonFile = `poly_${id}.json`;
 
     try {
-      // 1. Export from PostGIS
       await this.exportRasterFromPostgis(lon, lat, radius, path.join(this.SHARED_DIR, mdtFile));
 
-      // 2. Run GDAL via Docker Exec
-      // Note: We use the Linux paths used INSIDE the gdal_cli container
+      // Note: Linux paths used INSIDE the gdal_cli container
       const gdalCmd = `docker exec spatial_gdal_cli gdal_viewshed -ox ${lon} -oy ${lat} -oz ${obsHeight} -md ${radius} "${this.CONTAINER_DATA_DIR}/${mdtFile}" "${this.CONTAINER_DATA_DIR}/${outFile}"`;
       await execPromise(gdalCmd);
 
@@ -41,11 +39,10 @@ export class AppService {
       // );
       // this.logger.log(`GDAL Output: ${gdalResult}`);
 
-      // 3. Polygonize via Docker Exec
       const polyCmd = `docker exec spatial_gdal_cli gdal_polygonize.py "${this.CONTAINER_DATA_DIR}/${outFile}" -f "GeoJSON" "${this.CONTAINER_DATA_DIR}/${jsonFile}"`;
       await execPromise(polyCmd);
 
-      return await this.processFinalIntersection(id, lon, lat, radius);
+      return await this.processFinalIntersection(id, lon, lat, radius, rays, heading, fov);
     } finally {
       //this.cleanup(id);
       console.log('cleaning up seria');
@@ -89,50 +86,17 @@ export class AppService {
     fs.writeFileSync(fullPath, res.rows[0].tiff);
   }
 
-  private async processFinalIntersection(id: string, lon: number, lat: number, radius: number) {
+  private async processFinalIntersection(id: string, lon: number, lat: number, radius: number, rays: number, heading: number, fov: number) {
     const jsonPath = path.join(this.SHARED_DIR, `poly_${id}.json`);
     const geojsonRaw = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
     this.logger.debug(`GeoJSON Features count: ${geojsonRaw.features.length}`);
-    const visibleFeature = geojsonRaw.features.find((f: any) => f.properties.DN > 0 || f.properties.value > 0);
     const visibleFeatures = geojsonRaw.features.filter((f: any) => f.properties.DN > 0 || f.properties.value > 0);
     const visibleGeometries = visibleFeatures.map(f => f.geometry);
-    this.logger.debug(`Visible Feature: ${JSON.stringify(visibleFeature, null, 2)}`);
+    this.logger.debug(`Visible Feature: ${JSON.stringify(visibleFeatures, null, 2)}`);
 
-    if (!visibleFeature || !visibleFeature.geometry) {
+    if (!visibleFeatures) {
       throw new InternalServerErrorException('No visible area found in viewshed');
     }
-
-    // const intersectSql = `
-    //     WITH 
-    //     terrain_geom AS (
-    //       SELECT ST_SetSRID(ST_GeomFromGeoJSON($1), 4326) as geom
-    //     ),
-    //     center_point AS (
-    //         SELECT
-    //             ST_SetSRID(ST_Point($2, $3), 4326) AS geom
-    //     ),
-    //     building_array AS (
-    //       SELECT 
-    //         COALESCE(array_agg(t.geom), ARRAY[]::geometry[]) AS polys
-    //       FROM 
-    //         escorial_buildings t, center_point c
-    //       WHERE 
-    //         ST_DWithin(t.geom::geography, c.geom::geography, $4::float8)
-    //     )
-    //     SELECT ST_AsGeoJSON(
-    //       ST_Intersection(
-    //         tg.geom, 
-    //         VIEWSHED(
-    //           cp.geom, 
-    //           ba.polys, 
-    //           $4::float8, -- Cast to double precision
-    //           36,
-    //           -999,
-    //           360
-    //         )
-    //       )
-    //     ) as final_result
-    //     FROM terrain_geom tg, building_array ba, center_point cp;`;
 
     const intersectSql = `
         WITH 
@@ -155,31 +119,70 @@ export class AppService {
             escorial_buildings t, center_point c
           WHERE 
             ST_DWithin(t.geom::geography, c.geom::geography, $4::float8)
+        ),
+        final_intersection AS (
+          SELECT 
+            ST_Intersection(
+              tg.geom, 
+              VIEWSHED(
+                cp.geom, 
+                ba.polys, 
+                $4::float8, 
+                $5, 
+                $6, 
+                $7
+              )
+            ) as geom
+          FROM terrain_geom tg, building_array ba, center_point cp
         )
-        SELECT ST_AsGeoJSON(
-          ST_Intersection(
-            tg.geom, 
-            VIEWSHED(
-              cp.geom, 
-              ba.polys, 
-              $4::float8, 
-              36,
-              -999,
-              360
-            )
+        SELECT json_build_object(
+          'type', 'FeatureCollection',
+          'features',
+          COALESCE(
+            json_agg(
+              json_build_object(
+                'type', 'Feature',
+                'geometry', ST_AsGeoJSON(geom, 9, 3)::json,
+                'properties', json_build_object()
+              )
+            ) FILTER (WHERE geom IS NOT NULL AND NOT ST_IsEmpty(geom)),
+            '[]'::json
           )
-        ) as final_result
-        FROM terrain_geom tg, building_array ba, center_point cp;`;
+        ) AS geojson
+        FROM final_intersection`;
 
-    const finalRes = await this.client.query(intersectSql, [
-      visibleGeometries.map(g => JSON.stringify(g)), 
-      lon, 
-      lat, 
-      radius
-    ]);
-    this.logger.debug(`FinalRes: ${JSON.stringify(finalRes, null, 2)}`);
-    
-    return JSON.parse(finalRes.rows[0].final_result);
+    const params = [
+      visibleGeometries.map(g => JSON.stringify(g)),
+      lon,
+      lat,
+      radius,
+      rays,
+      heading,
+      fov
+    ];
+    const finalRes = await this.client.query(intersectSql, params);
+
+    if (!finalRes.rows || finalRes.rows.length === 0) {
+      // No row returned at all — return empty FeatureCollection
+      return { type: "FeatureCollection", features: [] };
+    }
+
+    let geojson = finalRes.rows[0].geojson;
+
+    if (geojson === null || geojson === undefined) {
+      // explicit fallback
+      return { type: "FeatureCollection", features: [] };
+    }
+
+    if (typeof geojson === "string") {
+      try {
+        geojson = JSON.parse(geojson);
+      } catch (err) {
+        throw new Error("Invalid JSON returned from database: " + String(err));
+      }
+    }
+
+    return geojson;
   }
 
   private cleanup(id: string) {

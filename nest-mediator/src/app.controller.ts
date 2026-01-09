@@ -15,15 +15,18 @@ export class AppController {
     @Query('lon', ParseFloatPipe) lon: number,
     @Query('radius', ParseIntPipe) radius: number,
     @Query('height', ParseIntPipe) height: number,
+    @Query('rays', ParseIntPipe) rays: number,
+    @Query('heading', ParseIntPipe) heading: number,
+    @Query('fov', ParseIntPipe) fov: number,
   ) {
     const startTime = Date.now();
-    const result = await this.appService.getViewshedGdal(lat, lon, radius, height);
+    const result = await this.appService.getViewshedGdal(lat, lon, radius, height, rays, heading, fov);
     const duration = Date.now() - startTime;
 
     return {
       engine: 'GDAL+ Postgis',
       executionTimeMs: duration,
-      data: result,
+      geojson: result,
     };
   }
 }
