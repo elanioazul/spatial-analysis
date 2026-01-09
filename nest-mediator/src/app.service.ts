@@ -20,7 +20,7 @@ export class AppService {
   /**
    * VARIATION 1: GDAL VIEWSHED
    */
-  async getViewshedGdal(lat: number, lon: number, radius: number, obsHeight: number) {
+  async getViewshedGdal(lat: number, lon: number, radius: number, obsHeight: number, rays: number, heading: number, fov: number) {
     const id = Math.random().toString(36).substring(7);
     const mdtFile = `mdt_${id}.tif`;
     const outFile = `view_${id}.tif`;
@@ -42,7 +42,7 @@ export class AppService {
       const polyCmd = `docker exec spatial_gdal_cli gdal_polygonize.py "${this.CONTAINER_DATA_DIR}/${outFile}" -f "GeoJSON" "${this.CONTAINER_DATA_DIR}/${jsonFile}"`;
       await execPromise(polyCmd);
 
-      return await this.processFinalIntersection(id, lon, lat, radius);
+      return await this.processFinalIntersection(id, lon, lat, radius, rays, heading, fov);
     } finally {
       //this.cleanup(id);
       console.log('cleaning up seria');
@@ -86,7 +86,7 @@ export class AppService {
     fs.writeFileSync(fullPath, res.rows[0].tiff);
   }
 
-  private async processFinalIntersection(id: string, lon: number, lat: number, radius: number) {
+  private async processFinalIntersection(id: string, lon: number, lat: number, radius: number, rays: number, heading: number, fov: number) {
     const jsonPath = path.join(this.SHARED_DIR, `poly_${id}.json`);
     const geojsonRaw = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
     this.logger.debug(`GeoJSON Features count: ${geojsonRaw.features.length}`);
@@ -124,7 +124,14 @@ export class AppService {
           SELECT 
             ST_Intersection(
               tg.geom, 
-              VIEWSHED(cp.geom, ba.polys, $4::float8, 36, -999, 360)
+              VIEWSHED(
+                cp.geom, 
+                ba.polys, 
+                $4::float8, 
+                $5, 
+                $6, 
+                $7
+              )
             ) as geom
           FROM terrain_geom tg, building_array ba, center_point cp
         )
@@ -148,7 +155,10 @@ export class AppService {
       visibleGeometries.map(g => JSON.stringify(g)),
       lon,
       lat,
-      radius
+      radius,
+      rays,
+      heading,
+      fov
     ];
     const finalRes = await this.client.query(intersectSql, params);
 
