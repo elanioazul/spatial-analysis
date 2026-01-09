@@ -10,9 +10,9 @@ const execPromise = promisify(exec);
 @Injectable()
 export class AppService {
   private readonly logger = new Logger(AppService.name);
-  // Inside the Nest container, this is where we write files
+  // Nest container, this is where nest write files
   private readonly SHARED_DIR = '/tmp/spatial';
-  // Inside the GDAL/GRASS containers, this is where they look
+  // GDAL/GRASS containers, this is where they look for files
   private readonly CONTAINER_DATA_DIR = '/data';
 
   constructor(@Inject('PG_CLIENT') private readonly client: Client) { }
@@ -27,11 +27,9 @@ export class AppService {
     const jsonFile = `poly_${id}.json`;
 
     try {
-      // 1. Export from PostGIS
       await this.exportRasterFromPostgis(lon, lat, radius, path.join(this.SHARED_DIR, mdtFile));
 
-      // 2. Run GDAL via Docker Exec
-      // Note: We use the Linux paths used INSIDE the gdal_cli container
+      // Note: Linux paths used INSIDE the gdal_cli container
       const gdalCmd = `docker exec spatial_gdal_cli gdal_viewshed -ox ${lon} -oy ${lat} -oz ${obsHeight} -md ${radius} "${this.CONTAINER_DATA_DIR}/${mdtFile}" "${this.CONTAINER_DATA_DIR}/${outFile}"`;
       await execPromise(gdalCmd);
 
@@ -41,7 +39,6 @@ export class AppService {
       // );
       // this.logger.log(`GDAL Output: ${gdalResult}`);
 
-      // 3. Polygonize via Docker Exec
       const polyCmd = `docker exec spatial_gdal_cli gdal_polygonize.py "${this.CONTAINER_DATA_DIR}/${outFile}" -f "GeoJSON" "${this.CONTAINER_DATA_DIR}/${jsonFile}"`;
       await execPromise(polyCmd);
 
