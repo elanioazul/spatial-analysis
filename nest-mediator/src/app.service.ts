@@ -140,6 +140,7 @@ export class AppService {
           'features',
           COALESCE(
             json_agg(
+              -- https://blog.cleverelephant.ca/2019/03/geojson.html
               json_build_object(
                 'type', 'Feature',
                 'geometry', ST_AsGeoJSON(geom, 9, 3)::json,
