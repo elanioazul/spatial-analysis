@@ -235,4 +235,72 @@ export class AppService {
       throw new InternalServerErrorException(errorMessage);
     }
   }
+
+
+  async checkBuildingIntersection(inputGeom: any) {
+    const geomJson = JSON.stringify(inputGeom);
+
+    const query = `
+        WITH 
+        -- 1. Parse and Validate Input
+        raw_input AS (
+          SELECT ST_SetSRID(ST_GeomFromGeoJSON($1), 4326) as geom
+        ),
+        validated_input AS (
+          SELECT CASE WHEN ST_IsValid(geom) THEN geom ELSE ST_MakeValid(geom) END as geom
+          FROM raw_input
+        ),
+        -- 2. Spatial Guard: Get the Bounding Box of the entire table
+        -- In production, you might cache this extent value to avoid computing it every time
+        layer_extent AS (
+          SELECT ST_Extent(geom)::geometry as bbox FROM escorial_buildings
+        ),
+        -- 3. The Guard Check
+        -- If the input doesn't even touch the Bounding Box, this CTE returns 0 rows
+        guarded_input AS (
+          SELECT v.geom 
+          FROM validated_input v, layer_extent e
+          WHERE v.geom && e.bbox
+        ),
+        -- 4. Precise Intersection
+        intersecting_features AS (
+          SELECT 
+            t.geom,
+            row_to_json(t.*)::jsonb - 'geom' as properties 
+          FROM 
+            escorial_buildings t, 
+            guarded_input g
+          WHERE 
+            ST_Intersects(t.geom, g.geom)
+        )
+        -- 5. Final GeoJSON Aggregation
+        SELECT json_build_object(
+          'type', 'FeatureCollection',
+          'features', COALESCE(
+            json_agg(
+              json_build_object(
+                'type', 'Feature',
+                'geometry', ST_AsGeoJSON(geom, 9, 3)::json,
+                'properties', properties
+              )
+            ) FILTER (WHERE geom IS NOT NULL),
+            '[]'::json
+          )
+        ) AS geojson
+        FROM intersecting_features;
+      `;
+
+    try {
+      const result = await this.client.query(query, [geomJson]);
+      
+      if (!result.rows || result.rows.length === 0) {
+        return { type: "FeatureCollection", features: [] };
+      }
+
+      return result.rows[0].geojson;
+    } catch (error) {
+      this.logger.error(`Spatial query failed: ${error.message}`);
+      throw new InternalServerErrorException('Error processing spatial intersection');
+    }
+  }
 }

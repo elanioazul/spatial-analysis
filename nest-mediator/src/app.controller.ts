@@ -1,5 +1,6 @@
-import { Controller, Get, ParseFloatPipe, ParseIntPipe, Query } from '@nestjs/common';
+import { Body, Controller, Get, ParseFloatPipe, ParseIntPipe, Post, Query } from '@nestjs/common';
 import { AppService } from './app.service';
+import { GeoJsonDto } from './dto/geojson.dto';
 
 @Controller('spatial')
 export class AppController {
@@ -25,6 +26,22 @@ export class AppController {
 
     return {
       engine: 'GDAL+ Postgis',
+      executionTimeMs: duration,
+      geojson: result,
+    };
+  }
+
+
+  @Post('intersect-buildings')
+  async checkIntersections(
+    @Body() geojsonInput: GeoJsonDto,
+  ) {
+    const startTime = Date.now();
+    const result = await this.appService.checkBuildingIntersection(geojsonInput);
+    const duration = Date.now() - startTime;
+
+    return {
+      engine: 'PostGIS + NestJS Validation',
       executionTimeMs: duration,
       geojson: result,
     };
